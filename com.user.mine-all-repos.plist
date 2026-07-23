@@ -10,7 +10,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>REPLACE_WITH_ABSOLUTE_PATH/scripts/mine-all-repos-cron.sh</string>
+        <string>REPLACE_WITH_ABSOLUTE_PATH/mine-all-repos-cron.sh</string>
     </array>
 
     <!-- Once a day (86400 seconds). Change to taste. -->

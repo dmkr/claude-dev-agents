@@ -11,10 +11,12 @@
 #   claude-agents status           health check
 #   claude-agents doctor           verify dependencies
 #
-# Scripts live in libexec/, resolved relative to this file (brew sets this up).
+# This script lives next to its data (CLAUDE.md, the plist) and its helper
+# scripts. Brew installs the whole tree into libexec/ and symlinks bin/, so the
+# helpers sit in the same directory; in a repo checkout they're in libexec/.
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.2"
 
 # Resolve our own location, following symlinks (brew links into bin/).
 SELF="${BASH_SOURCE[0]}"
@@ -26,7 +28,12 @@ while [ -L "$SELF" ]; do
   esac
 done
 PREFIX="$(cd "$(dirname "$SELF")" && pwd)"
-LIBEXEC="${CLAUDE_AGENTS_LIBEXEC:-$PREFIX}"
+# Installed layout: helpers are flat beside us. Checkout: they're in libexec/.
+if [ -z "${CLAUDE_AGENTS_LIBEXEC:-}" ] && [ -d "$PREFIX/libexec" ]; then
+  LIBEXEC="$PREFIX/libexec"
+else
+  LIBEXEC="${CLAUDE_AGENTS_LIBEXEC:-$PREFIX}"
+fi
 
 LESSONS_DIR="${LESSONS_DIR:-$HOME/.claude/lessons}"
 PLIST_LABEL="com.user.mine-all-repos"
@@ -75,7 +82,6 @@ cmd_setup() {
     mkdir -p "$LA" "$HOME/Library/Logs"
     sed -e "s|REPLACE_WITH_ABSOLUTE_PATH|$LIBEXEC|g" \
         -e "s|REPLACE_WITH_HOME|$HOME|g" \
-        -e "s|/scripts/|/|g" \
         "$PREFIX/com.user.mine-all-repos.plist" > "$PLIST"
     launchctl unload "$PLIST" >/dev/null 2>&1 || true
     launchctl load "$PLIST" >/dev/null 2>&1 || c_warn "couldn't load launchd agent"
