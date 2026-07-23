@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# claude-agents — local multi-agent dev setup driven by `claude -p`.
+#
+# Usage:
+#   claude-agents setup            one-time machine wiring (global CLAUDE.md, daily miner)
+#   claude-agents install [PATH]   install git hooks into a repo (default: cwd)
+#   claude-agents uninstall        remove machine wiring (repo hooks stay)
+#   claude-agents mine             run the cross-repo lesson miner now
+#   claude-agents sync             sync lessons into the current repo
+#   claude-agents ask "question"   ask about the current codebase
+#   claude-agents status           health check
+#   claude-agents doctor           verify dependencies
+#
+# Scripts live in libexec/, resolved relative to this file (brew sets this up).
+set -euo pipefail
+
+VERSION="1.0.0"
+
+# Resolve our own location, following symlinks (brew links into bin/).
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  _target="$(readlink "$SELF")"
+  case "$_target" in
+    /*) SELF="$_target" ;;
+    *)  SELF="$(cd "$(dirname "$SELF")" && pwd)/$_target" ;;
+  esac
+done
+PREFIX="$(cd "$(dirname "$SELF")" && pwd)"
+LIBEXEC="${CLAUDE_AGENTS_LIBEXEC:-$PREFIX/libexec}"
+
+LESSONS_DIR="${LESSONS_DIR:-$HOME/.claude/lessons}"
+PLIST_LABEL="com.user.mine-all-repos"
+
+c_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+c_info() { printf '  \033[36m•\033[0m %s\n' "$1"; }
+c_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+c_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+die()    { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+
+# ---------------------------------------------------------------- doctor
+cmd_doctor() {
+  echo "Dependencies:"
+  local ok=0
+  for c in claude gh jq git; do
+    if command -v "$c" >/dev/null 2>&1; then c_ok "$c  ($(command -v "$c"))"
+    else c_bad "$c  not found"; ok=1; fi
+  done
+  if command -v gh >/dev/null 2>&1; then
+    if gh auth status >/dev/null 2>&1; then c_ok "gh authenticated"
+    else c_warn "gh not authenticated — run: gh auth login"; ok=1; fi
+  fi
+  echo
+  [ "$ok" -eq 0 ] && c_ok "all good" || c_warn "fix the above, then re-run"
+  return $ok
+}
+
+# ---------------------------------------------------------------- setup
+cmd_setup() {
+  echo "Machine setup:"
+  cmd_doctor >/dev/null 2>&1 || { cmd_doctor; die "dependencies missing"; }
+  c_ok "dependencies present"
+
+  mkdir -p "$HOME/.claude" "$LESSONS_DIR"
+  if [ -f "$HOME/.claude/CLAUDE.md" ] && ! cmp -s "$PREFIX/CLAUDE.md" "$HOME/.claude/CLAUDE.md"; then
+    cp "$HOME/.claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md.bak"
+    c_info "backed up existing CLAUDE.md -> CLAUDE.md.bak"
+  fi
+  cp "$PREFIX/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+  c_ok "global CLAUDE.md -> ~/.claude/CLAUDE.md"
+  c_ok "lessons library -> $LESSONS_DIR"
+
+  if [ "$(uname)" = "Darwin" ]; then
+    local LA="$HOME/Library/LaunchAgents" PLIST
+    PLIST="$LA/$PLIST_LABEL.plist"
+    mkdir -p "$LA" "$HOME/Library/Logs"
+    sed -e "s|REPLACE_WITH_ABSOLUTE_PATH|$LIBEXEC|g" \
+        -e "s|REPLACE_WITH_HOME|$HOME|g" \
+        -e "s|/scripts/|/|g" \
+        "$PREFIX/com.user.mine-all-repos.plist" > "$PLIST"
+    launchctl unload "$PLIST" >/dev/null 2>&1 || true
+    launchctl load "$PLIST" >/dev/null 2>&1 || c_warn "couldn't load launchd agent"
+    c_ok "daily miner loaded (runs now, then daily)"
+  else
+    c_warn "not macOS — add a cron entry for $LIBEXEC/mine-all-repos-cron.sh"
+  fi
+  echo; c_info "next: cd into a repo and run  claude-agents install"
+}
+
+# ---------------------------------------------------------------- install (repo)
+cmd_install() {
+  local repo="${1:-$PWD}"
+  repo="$(cd "$repo" && git rev-parse --show-toplevel 2>/dev/null)" || die "not a git repo: ${1:-$PWD}"
+  echo "Installing hooks into: $repo"
+  local H="$repo/.git/hooks"
+  mkdir -p "$H" "$repo/.claude/review"
+
+  local hook target
+  for pair in "pre-commit:pre-commit.sh" \
+              "prepare-commit-msg:prepare-commit-msg.sh" \
+              "pre-push:pre-push.sh"; do
+    hook="${pair%%:*}"; target="${pair##*:}"
+    if [ -e "$H/$hook" ] && [ ! -L "$H/$hook" ]; then
+      mv "$H/$hook" "$H/$hook.bak"; c_info "backed up $hook -> $hook.bak"
+    fi
+    ln -sf "$LIBEXEC/$target" "$H/$hook"
+    c_ok "$hook"
+  done
+
+  [ -f "$repo/.claude/review/STYLE_GUIDE.md" ] || cat > "$repo/.claude/review/STYLE_GUIDE.md" <<'EOF'
+# Team style guide
+# Concrete, checkable rules. The pre-push reviewer enforces these, and the
+# interactive coding agent reads them before writing code.
+EOF
+  [ -f "$repo/.claude/review/BOUNDARIES.md" ] || cat > "$repo/.claude/review/BOUNDARIES.md" <<'EOF'
+# Intended architecture / module boundaries
+# State what may import what. The drift-watcher flags diffs that cross these.
+EOF
+  c_ok "seeded .claude/review/"
+  (cd "$repo" && "$LIBEXEC/sync-lessons.sh" >/dev/null 2>&1) \
+    || c_info "no lessons yet — run 'claude-agents mine' or wait for the daily run"
+  echo; c_info "edit .claude/review/{STYLE_GUIDE,BOUNDARIES}.md to taste"
+}
+
+# ---------------------------------------------------------------- uninstall
+cmd_uninstall() {
+  echo "Removing machine wiring:"
+  if [ "$(uname)" = "Darwin" ]; then
+    local PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+    launchctl unload "$PLIST" >/dev/null 2>&1 || true
+    rm -f "$PLIST"; c_ok "removed launchd agent"
+  fi
+  c_info "left alone: ~/.claude/CLAUDE.md, $LESSONS_DIR, per-repo hooks"
+  c_info "brew uninstall claude-agents removes the command itself"
+}
+
+# ---------------------------------------------------------------- status
+cmd_status() {
+  echo "claude-agents $VERSION"
+  echo "  libexec: $LIBEXEC"
+  echo
+  echo "Machine:"
+  [ -f "$HOME/.claude/CLAUDE.md" ] && c_ok "global CLAUDE.md present" || c_warn "no global CLAUDE.md (run: claude-agents setup)"
+  if [ -d "$LESSONS_DIR" ]; then
+    local n; n="$(find "$LESSONS_DIR" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
+    c_ok "lessons library: $n file(s) in $LESSONS_DIR"
+    [ -f "$LESSONS_DIR/.last-run" ] && c_info "last mined PR: $(cat "$LESSONS_DIR/.last-run")"
+  else
+    c_warn "no lessons library yet"
+  fi
+  if [ "$(uname)" = "Darwin" ]; then
+    if launchctl list 2>/dev/null | grep -q "$PLIST_LABEL"; then
+      c_ok "daily miner loaded ($(launchctl list | awk -v l="$PLIST_LABEL" '$3==l {print "last exit "$2}'))"
+    else
+      c_warn "daily miner not loaded (run: claude-agents setup)"
+    fi
+    local log="$HOME/Library/Logs/mine-all-repos.log"
+    [ -f "$log" ] && c_info "last log entry: $(grep '=====' "$log" | tail -1)"
+  fi
+  echo
+  echo "This repo:"
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    local H; H="$(git rev-parse --show-toplevel)/.git/hooks"
+    for h in pre-commit prepare-commit-msg pre-push; do
+      [ -L "$H/$h" ] && c_ok "$h hooked" || c_warn "$h not installed"
+    done
+  else
+    c_info "not inside a git repo"
+  fi
+}
+
+# ---------------------------------------------------------------- dispatch
+case "${1:-}" in
+  setup)      shift; cmd_setup "$@" ;;
+  install)    shift; cmd_install "${1:-$PWD}" ;;
+  uninstall)  shift; cmd_uninstall ;;
+  mine)       shift; "$LIBEXEC/mine-all-repos.sh" "$@" ;;
+  sync)       shift; "$LIBEXEC/sync-lessons.sh" "$@" ;;
+  ask)        shift; "$LIBEXEC/ask.sh" "$@" ;;
+  status)     shift; cmd_status ;;
+  doctor)     shift; cmd_doctor ;;
+  -v|--version) echo "claude-agents $VERSION" ;;
+  ""|-h|--help) sed -n '4,13p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $1 (try --help)" ;;
+esac

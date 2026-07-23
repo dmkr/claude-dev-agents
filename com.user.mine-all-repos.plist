@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.mine-all-repos</string>
+
+    <!-- Run the wrapper. Edit the path to where you put the script. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>REPLACE_WITH_ABSOLUTE_PATH/scripts/mine-all-repos-cron.sh</string>
+    </array>
+
+    <!-- Once a day (86400 seconds). Change to taste. -->
+    <key>StartInterval</key>
+    <integer>86400</integer>
+
+    <!-- Also run once shortly after load/login so you don't wait for the first tick. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Don't pile up runs if the Mac was asleep; one catch-up run is enough. -->
+    <key>StandardOutPath</key>
+    <string>REPLACE_WITH_HOME/Library/Logs/mine-all-repos.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>REPLACE_WITH_HOME/Library/Logs/mine-all-repos.err.log</string>
+</dict>
+</plist>

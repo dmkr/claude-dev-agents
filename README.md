@@ -1,0 +1,82 @@
+# claude-dev-agents
+
+A local multi-agent development setup built on `claude -p`. Five agents share one
+per-repo "brain," fed by a daily cross-repo miner that learns from your merged-PR
+review feedback so you stop repeating the same mistakes.
+
+## Install
+
+```bash
+brew install YOUR_GITHUB_USER/tap/claude-agents
+```
+
+Claude Code isn't on Homebrew, so install it separately:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+gh auth login
+```
+
+Then:
+
+```bash
+claude-agents setup                        # one-time machine wiring
+cd ~/code/some-repo && claude-agents install   # per repo
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `claude-agents setup` | Global `CLAUDE.md`, lessons dir, daily miner (launchd) |
+| `claude-agents install [PATH]` | Git hooks + seeded brain files in a repo |
+| `claude-agents mine` | Run the cross-repo lesson miner now |
+| `claude-agents sync` | Sync central lessons into this repo |
+| `claude-agents ask "..."` | Ask a question about this codebase |
+| `claude-agents status` | Health check (miner, lessons, hooks) |
+| `claude-agents doctor` | Verify dependencies |
+| `claude-agents uninstall` | Remove machine wiring |
+
+## The agents
+
+- **Test-guardian** (`pre-commit`, advisory) — flags new functions lacking tests.
+- **Commit-message writer** (`prepare-commit-msg`) — drafts messages from the diff.
+- **Reviewer + PR-description + drift-watcher** (`pre-push`, one call) — the
+  reviewer blocks the push on serious issues; the others are advisory.
+- **Codebase Q&A** (`claude-agents ask`) — answers with file/function citations.
+- **Cross-repo lesson miner** (daily) — distills review feedback from every repo
+  you've authored merged PRs in, split into language-agnostic and per-language
+  lessons, synced into each repo on push.
+
+## Layout
+
+```
+~/.claude/CLAUDE.md      # global instructions for interactive Claude Code
+~/.claude/lessons/       # central mined lessons (source of truth)
+<repo>/.claude/review/   # per-repo brain: style, boundaries, synced lessons
+<repo>/.git/hooks/       # symlinks into the brew libexec
+```
+
+## The brain
+
+Two files you write per repo:
+
+- `STYLE_GUIDE.md` — concrete, checkable conventions the reviewer enforces.
+- `BOUNDARIES.md` — what may import what; the drift-watcher flags crossings.
+
+One file generated for you:
+
+- `LESSONS.md` — synced from `~/.claude/lessons/`, filtered to this repo's
+  languages plus cross-cutting principles.
+
+## Notes
+
+- Hooks fail open: if Claude errors, the git operation proceeds. Only a clean
+  `error`-severity finding blocks a push. Override with `git push --no-verify`.
+- `claude -p` draws on the Agent SDK credit bucket, separate from interactive use.
+- Move the lessons library by setting `LESSONS_DIR`.
+- Miner cadence lives in the plist (`StartInterval`, seconds). Default: daily.
+
+## License
+
+MIT
