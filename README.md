@@ -41,8 +41,11 @@ cd ~/code/some-repo && claude-agents install   # per repo
 
 - **Test-guardian** (`pre-commit`, advisory) — flags new functions lacking tests.
 - **Commit-message writer** (`prepare-commit-msg`) — drafts messages from the diff.
-- **Reviewer + PR-description + drift-watcher** (`pre-push`, one call) — the
-  reviewer blocks the push on serious issues; the others are advisory.
+- **Reviewer + PR-description + drift-watcher** (`pre-push`) — the reviewer
+  blocks the push on serious issues in one fast call (Haiku by default). The
+  PR description and drift check are advisory: they run in the background so
+  they don't slow the push, writing `.git/{PR_BODY,DRIFT}.md`. Whitespace-only
+  and docs-only pushes skip the model entirely.
 - **Codebase Q&A** (`claude-agents ask`) — answers with file/function citations.
 - **Cross-repo lesson miner** (daily) — distills review feedback from every repo
   you've authored merged PRs in, split into language-agnostic and per-language
@@ -74,6 +77,11 @@ One file generated for you:
 - Hooks fail open: if Claude errors, the git operation proceeds. Only a clean
   `error`-severity finding blocks a push. Override with `git push --no-verify`.
 - `claude -p` draws on the Agent SDK credit bucket, separate from interactive use.
+- Hooks run on Haiku for speed. Set `CLAUDE_AGENTS_MODEL` (e.g.
+  `claude-opus-4-8`) to trade latency for a stronger review.
+- `CLAUDE_AGENTS_DIFF_CAP` (chars, default 120000) bounds the diff sent to the
+  reviewer; `CLAUDE_AGENTS_NO_PR_DESC=1` skips the background PR-description and
+  drift pass (one fewer `claude -p` call per push).
 - Move the lessons library by setting `LESSONS_DIR`.
 - Miner cadence lives in the plist (`StartInterval`, seconds). Default: daily.
 
