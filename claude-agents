@@ -8,6 +8,8 @@
 #   claude-agents mine             run the cross-repo lesson miner now
 #   claude-agents sync             sync lessons into the current repo
 #   claude-agents ask "question"   ask about the current codebase
+#   claude-agents review [SPEC]    review changes without pushing (--staged | RANGE)
+#   claude-agents pr [gh args]     open a PR with the generated .git/PR_BODY.md
 #   claude-agents status           health check
 #   claude-agents doctor           verify dependencies
 #
@@ -16,7 +18,7 @@
 # helpers sit in the same directory; in a repo checkout they're in libexec/.
 set -euo pipefail
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 
 # Resolve our own location, following symlinks (brew links into bin/).
 SELF="${BASH_SOURCE[0]}"
@@ -43,6 +45,17 @@ c_info() { printf '  \033[36m•\033[0m %s\n' "$1"; }
 c_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 c_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
 die()    { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+
+# Prefer Homebrew's stable opt/ path for hook symlinks so they survive upgrades
+# (the versioned Cellar path changes each release and would leave dangling links).
+hook_libexec() {
+  case "$LIBEXEC" in
+    */Cellar/claude-agents/*/libexec)
+      local opt; opt="$(brew --prefix 2>/dev/null)/opt/claude-agents/libexec"
+      [ -d "$opt" ] && { echo "$opt"; return; } ;;
+  esac
+  echo "$LIBEXEC"
+}
 
 # ---------------------------------------------------------------- doctor
 cmd_doctor() {
@@ -97,7 +110,8 @@ cmd_install() {
   local repo="${1:-$PWD}"
   repo="$(cd "$repo" && git rev-parse --show-toplevel 2>/dev/null)" || die "not a git repo: ${1:-$PWD}"
   echo "Installing hooks into: $repo"
-  local H="$repo/.git/hooks"
+  local H="$repo/.git/hooks" HL
+  HL="$(hook_libexec)"
   mkdir -p "$H" "$repo/.claude/review"
 
   local hook target
@@ -108,7 +122,7 @@ cmd_install() {
     if [ -e "$H/$hook" ] && [ ! -L "$H/$hook" ]; then
       mv "$H/$hook" "$H/$hook.bak"; c_info "backed up $hook -> $hook.bak"
     fi
-    ln -sf "$LIBEXEC/$target" "$H/$hook"
+    ln -sf "$HL/$target" "$H/$hook"
     c_ok "$hook"
   done
 
@@ -167,7 +181,12 @@ cmd_status() {
   if git rev-parse --show-toplevel >/dev/null 2>&1; then
     local H; H="$(git rev-parse --show-toplevel)/.git/hooks"
     for h in pre-commit prepare-commit-msg pre-push; do
-      [ -L "$H/$h" ] && c_ok "$h hooked" || c_warn "$h not installed"
+      if [ -L "$H/$h" ]; then
+        [ -e "$H/$h" ] && c_ok "$h hooked" \
+          || c_warn "$h symlink broken — target moved (run: claude-agents install)"
+      else
+        c_warn "$h not installed"
+      fi
     done
   else
     c_info "not inside a git repo"
@@ -182,9 +201,11 @@ case "${1:-}" in
   mine)       shift; "$LIBEXEC/mine-all-repos.sh" "$@" ;;
   sync)       shift; "$LIBEXEC/sync-lessons.sh" "$@" ;;
   ask)        shift; "$LIBEXEC/ask.sh" "$@" ;;
+  review)     shift; "$LIBEXEC/review.sh" "$@" ;;
+  pr)         shift; "$LIBEXEC/pr.sh" "$@" ;;
   status)     shift; cmd_status ;;
   doctor)     shift; cmd_doctor ;;
   -v|--version) echo "claude-agents $VERSION" ;;
-  ""|-h|--help) sed -n '4,13p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  ""|-h|--help) sed -n '4,15p' "$SELF" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command: $1 (try --help)" ;;
 esac

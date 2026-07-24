@@ -33,6 +33,8 @@ cd ~/code/some-repo && claude-agents install   # per repo
 | `claude-agents mine` | Run the cross-repo lesson miner now |
 | `claude-agents sync` | Sync central lessons into this repo |
 | `claude-agents ask "..."` | Ask a question about this codebase |
+| `claude-agents review [SPEC]` | Run the reviewer without pushing (`--staged`, or a range) |
+| `claude-agents pr [gh args]` | Open a PR with the generated `.git/PR_BODY.md` |
 | `claude-agents status` | Health check (miner, lessons, hooks) |
 | `claude-agents doctor` | Verify dependencies |
 | `claude-agents uninstall` | Remove machine wiring |
@@ -79,9 +81,14 @@ One file generated for you:
 - `claude -p` draws on the Agent SDK credit bucket, separate from interactive use.
 - Hooks run on Haiku for speed. Set `CLAUDE_AGENTS_MODEL` (e.g.
   `claude-opus-4-8`) to trade latency for a stronger review.
+- `CLAUDE_AGENTS_TIMEOUT` (seconds, default 90) caps each model call; on timeout
+  the hook fails open (the push proceeds), so a slow model can't stall you.
 - `CLAUDE_AGENTS_DIFF_CAP` (chars, default 120000) bounds the diff sent to the
   reviewer; `CLAUDE_AGENTS_NO_PR_DESC=1` skips the background PR-description and
   drift pass (one fewer `claude -p` call per push).
+- Repo hooks are symlinked via Homebrew's stable `opt` path, so a `brew upgrade`
+  doesn't break them. If a hook ever shows "symlink broken" in `status` (e.g.
+  after an older install), re-run `claude-agents install` to re-link.
 - Move the lessons library by setting `LESSONS_DIR`.
 - Miner cadence lives in the plist (`StartInterval`, seconds). Default: daily.
 

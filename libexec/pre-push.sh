@@ -47,42 +47,14 @@ if [ "${CLAUDE_AGENTS_NO_PR_DESC:-}" != "1" ]; then
 fi
 
 echo "pre-push: reviewing $RANGE with $CLAUDE_AGENTS_MODEL ..."
-
-BRAIN="$(load_brain)"
-
-# Blocking call asks ONLY for the verdict — the smallest output that can gate a
-# push — so it returns fast. The advisory PR body runs in the background above.
-PROMPT="You are a rigorous staff-level engineer reviewing the diff below.
-$BRAIN
-
-Return ONLY a JSON object, no markdown fences:
-{
-  \"findings\": [{\"severity\":\"error|warning|suggestion\",\"file\":\"\",\"line\":0,\"rule\":\"\",\"comment\":\"\"}],
-  \"verdict\": \"block|pass\"
-}
-Rules:
-- severity 'error' ONLY for things that must block a push: bugs, security,
-  data loss, broken contracts, or a repeat of a listed past lesson.
-- verdict is 'block' iff any finding is 'error'.
-- Report at most the 12 most severe findings. Be concise.
-
-DIFF:
-$DIFF"
-
-RAW="$(printf '%s' "$PROMPT" | claude_json)"
-
-if ! is_json "$RAW"; then
-  echo "pre-push: reviewer output unparseable; allowing push."
-  echo "$RAW"; exit 0
-fi
-
 echo "── review ───────────────────────────────────"
-echo "$RAW" | jq -r '.findings[]? | "  [\(.severity)] \(.file):\(.line) — \(.rule): \(.comment)"'
 
-if [ "$(echo "$RAW" | jq -r '.verdict')" = "block" ]; then
-  echo ""
-  echo "pre-push: BLOCKED — fix the [error] findings above, or: git push --no-verify"
-  exit 1
+# The blocking reviewer (verdict-only, so its output is small and fast) lives in
+# lib.sh so `claude-agents review` can reuse it. It fails open on any error.
+if run_review "$RANGE"; then
+  echo "pre-push: passed."
+  exit 0
 fi
-echo "pre-push: passed."
-exit 0
+echo ""
+echo "pre-push: BLOCKED — fix the [error] findings above, or: git push --no-verify"
+exit 1
