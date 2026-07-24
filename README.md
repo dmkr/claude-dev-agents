@@ -7,7 +7,7 @@ review feedback so you stop repeating the same mistakes.
 ## Install
 
 ```bash
-brew install YOUR_GITHUB_USER/tap/claude-agents
+brew install dmkr/tap/claude-agents
 ```
 
 Claude Code isn't on Homebrew, so install it separately:
