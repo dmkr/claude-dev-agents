@@ -78,6 +78,37 @@ agent_only_docs() {
 # never sources ~/.zshrc, so an exported var alone silently reverts to default.
 CLAUDE_AGENTS_CONFIG="${CLAUDE_AGENTS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-agents/config}"
 
+# Read env.<KEY> from Claude Code's settings files, later file winning. Bedrock
+# and Vertex are usually configured *there* rather than exported in the shell,
+# so a shell-env-only check silently concludes "first-party" and then probes ids
+# that cannot work on this account. Args: <KEY>.
+claude_setting_env() {
+  local key="$1" f v val=""
+  for f in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json" \
+           ".claude/settings.json" ".claude/settings.local.json"; do
+    [ -r "$f" ] || continue
+    v="$(jq -r --arg k "$key" '.env[$k] // empty' "$f" 2>/dev/null)" || continue
+    [ -n "$v" ] && val="$v"
+  done
+  printf '%s' "$val"
+}
+
+# Shell env first, then Claude Code's settings. "0"/"false" count as off.
+claude_env_or_setting() {
+  local key="$1" v
+  eval "v=\"\${$key:-}\""
+  [ -z "$v" ] && v="$(claude_setting_env "$key")"
+  case "$v" in 0|false|False|FALSE) v="" ;; esac
+  printf '%s' "$v"
+}
+
+# bedrock | vertex | first_party
+agents_backend() {
+  if   [ -n "$(claude_env_or_setting CLAUDE_CODE_USE_BEDROCK)" ]; then echo bedrock
+  elif [ -n "$(claude_env_or_setting CLAUDE_CODE_USE_VERTEX)"  ]; then echo vertex
+  else echo first_party; fi
+}
+
 # Set-but-empty and unset are different answers here: an empty value is setup's
 # way of recording "this backend only works with Claude Code's own default, so
 # pass no --model". Falling through to the id-guessing below in that case would
@@ -93,9 +124,11 @@ fi
 [ -n "$_ca_env_defined" ] && CLAUDE_AGENTS_MODEL="$_ca_env_value"
 
 if [ -z "${CLAUDE_AGENTS_MODEL+yes}" ]; then
-  CLAUDE_AGENTS_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-${ANTHROPIC_SMALL_FAST_MODEL:-}}"
-  if [ -z "$CLAUDE_AGENTS_MODEL" ] \
-     && [ -z "${CLAUDE_CODE_USE_BEDROCK:-}${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+  CLAUDE_AGENTS_MODEL="$(claude_env_or_setting ANTHROPIC_DEFAULT_HAIKU_MODEL)"
+  [ -z "$CLAUDE_AGENTS_MODEL" ] \
+    && CLAUDE_AGENTS_MODEL="$(claude_env_or_setting ANTHROPIC_SMALL_FAST_MODEL)"
+  # Only the first-party backend has an id we can safely assume.
+  if [ -z "$CLAUDE_AGENTS_MODEL" ] && [ "$(agents_backend)" = "first_party" ]; then
     CLAUDE_AGENTS_MODEL="claude-haiku-4-5"
   fi
 fi
@@ -191,11 +224,29 @@ probe_model() {
   [ -n "$raw" ] && [ -z "$(claude_error "$raw")" ]
 }
 
+# Ask Claude Code itself which model ids it uses on this backend: one call with
+# no --model, then read the modelUsage keys off the response. This is the only
+# discovery path that works uniformly across first-party, Bedrock, and Vertex —
+# no id formats to guess, no cloud CLI required, and the ids are known-valid
+# because they were just used. Prints one id per line, fastest-class first.
+models_in_use() {
+  local raw
+  raw="$(printf 'Reply with the single word: ok' \
+    | run_timeout "${CLAUDE_AGENTS_PROBE_TIMEOUT:-30}" \
+      claude -p - --allowedTools "" --output-format json 2>/dev/null || true)"
+  [ -n "$raw" ] && [ -z "$(claude_error "$raw")" ] || return 1
+  # Haiku-class first (that's what the hooks want), then everything else.
+  printf '%s' "$raw" | jq -r '(.modelUsage // {} | keys) as $k
+    | ($k | map(select(test("haiku"; "i"))))[]?, ($k | map(select(test("haiku"; "i") | not)))[]?' \
+    2>/dev/null || return 1
+}
+
 # Model ids to try, best (cheapest/fastest) first. On Bedrock the ids are
 # account-specific, so ask AWS for the real ones rather than guessing; the
 # static entries are only a fallback for when the aws CLI isn't around.
 model_candidates() {
-  if [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then
+  local backend; backend="$(agents_backend)"
+  if [ "$backend" = "bedrock" ]; then
     if command -v aws >/dev/null 2>&1; then
       # Inference profiles first (what `global.anthropic.*` ids are), then
       # on-demand foundation models. Haiku before Sonnet, newest first.
@@ -208,7 +259,7 @@ model_candidates() {
     fi
     echo "global.anthropic.claude-haiku-4-5-20251001-v1:0"
     echo "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-  elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+  elif [ "$backend" = "vertex" ]; then
     echo "claude-haiku-4-5@20251001"
     echo "claude-haiku-4-5"
   else
@@ -223,10 +274,25 @@ model_candidates() {
 # which means the CLI itself is broken or unauthenticated, not a model problem.
 detect_model() {
   local c
+  # 1. Ask Claude Code which ids it actually uses here. Backend-agnostic and
+  #    already proven valid, so this is tried before any guessing.
+  #
+  #    Haiku-class only, deliberately. modelUsage reports what *that call*
+  #    happened to use, so the list is non-deterministic: haiku shows up only
+  #    when a background task ran, and otherwise it is just the main model.
+  #    Accepting whatever came back would quietly pin every hook to Opus — the
+  #    exact opposite of wanting a cheap, fast reviewer.
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    case "$c" in *[Hh]aiku*) ;; *) continue ;; esac
+    if probe_model "$c"; then printf '%s\n' "$c"; return 0; fi
+  done <<< "$(models_in_use 2>/dev/null || true)"
+  # 2. Guess from the backend's known id shapes.
   while IFS= read -r c; do
     [ -n "$c" ] || continue
     if probe_model "$c"; then printf '%s\n' "$c"; return 0; fi
   done <<< "$(model_candidates)"
+  # 3. Whatever Claude Code picks on its own — valid, just not necessarily fast.
   probe_model "" && return 0
   return 1
 }

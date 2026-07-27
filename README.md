@@ -82,12 +82,18 @@ One file generated for you:
 - Hooks run on Haiku for speed. Set `CLAUDE_AGENTS_MODEL` (e.g.
   `claude-opus-4-8`) to trade latency for a stronger review.
 - **`claude-agents setup` auto-detects the model.** Model ids are backend- and
-  (on Bedrock) account-specific, so setup probes candidates fastest-first —
-  asking `aws bedrock list-inference-profiles` for the real ids where available
-  — and records the first that answers in
-  `~/.config/claude-agents/config`. The hooks read that file, so the choice
-  survives environments git hooks don't inherit (GUI clients never source
-  `~/.zshrc`). Re-run `setup` after switching backends.
+  (on Bedrock) account-specific, so setup asks Claude Code which ids it actually
+  uses (the `modelUsage` field of a real call), falling back to per-backend
+  candidates and `aws bedrock list-inference-profiles`. It records the first
+  that answers in `~/.config/claude-agents/config`. The hooks read that file, so
+  the choice survives environments git hooks don't inherit (GUI clients never
+  source `~/.zshrc`). Re-run `setup` after switching backends.
+- **Backend detection reads `~/.claude/settings.json` too**, not just the shell
+  environment — `CLAUDE_CODE_USE_BEDROCK` is usually set in that file's `env`
+  block, where an exported-variable check would never see it. Project-level
+  `.claude/settings.json` and `.local.json` overrides are honoured, later
+  winning. Only haiku-class ids are auto-selected; detection will never silently
+  pin the hooks to a large model.
 - Full resolution order: `CLAUDE_AGENTS_MODEL` → the config file →
   `ANTHROPIC_DEFAULT_HAIKU_MODEL` → `ANTHROPIC_SMALL_FAST_MODEL` → on a provider
   backend with none of those, no `--model` flag at all (Claude Code picks) →
