@@ -19,7 +19,7 @@ case "${1:-}" in
   *)                 SPEC="$1";       LABEL="$1" ;;
 esac
 
-echo "reviewing $LABEL with $CLAUDE_AGENTS_MODEL ..."
+echo "reviewing $LABEL with $CLAUDE_AGENTS_MODEL_LABEL ..."
 echo "── review ───────────────────────────────────"
 if run_review "$SPEC"; then
   echo "review: pass"

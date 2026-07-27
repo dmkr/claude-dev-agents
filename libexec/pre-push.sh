@@ -46,7 +46,7 @@ if [ "${CLAUDE_AGENTS_NO_PR_DESC:-}" != "1" ]; then
   echo "pre-push: PR description + drift → .git/{PR_BODY,DRIFT}.md (in background)"
 fi
 
-echo "pre-push: reviewing $RANGE with $CLAUDE_AGENTS_MODEL ..."
+echo "pre-push: reviewing $RANGE with $CLAUDE_AGENTS_MODEL_LABEL ..."
 echo "── review ───────────────────────────────────"
 
 # The blocking reviewer (verdict-only, so its output is small and fast) lives in

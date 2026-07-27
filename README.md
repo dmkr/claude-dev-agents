@@ -81,6 +81,24 @@ One file generated for you:
 - `claude -p` draws on the Agent SDK credit bucket, separate from interactive use.
 - Hooks run on Haiku for speed. Set `CLAUDE_AGENTS_MODEL` (e.g.
   `claude-opus-4-8`) to trade latency for a stronger review.
+- **`claude-agents setup` auto-detects the model.** Model ids are backend- and
+  (on Bedrock) account-specific, so setup probes candidates fastest-first —
+  asking `aws bedrock list-inference-profiles` for the real ids where available
+  — and records the first that answers in
+  `~/.config/claude-agents/config`. The hooks read that file, so the choice
+  survives environments git hooks don't inherit (GUI clients never source
+  `~/.zshrc`). Re-run `setup` after switching backends.
+- Full resolution order: `CLAUDE_AGENTS_MODEL` → the config file →
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL` → `ANTHROPIC_SMALL_FAST_MODEL` → on a provider
+  backend with none of those, no `--model` flag at all (Claude Code picks) →
+  otherwise `claude-haiku-4-5`. An *explicitly empty* value means "pass no
+  `--model`" and is distinct from unset.
+- Because the hooks fail open, a model id the backend rejects looks identical to
+  a clean review. `claude-agents doctor` makes one live call to tell them apart —
+  run it after changing backends or moving to a new machine.
+- Git hooks inherit the environment of whatever ran `git push`. Exporting
+  `CLAUDE_AGENTS_MODEL` in `~/.zshrc` covers terminal pushes but not GUI clients
+  (Fork, Tower, VS Code) — use `~/.zshenv` if you push from those.
 - `CLAUDE_AGENTS_TIMEOUT` (seconds, default 90) caps each model call; on timeout
   the hook fails open (the push proceeds), so a slow model can't stall you.
 - `CLAUDE_AGENTS_DIFF_CAP` (chars, default 120000) bounds the diff sent to the

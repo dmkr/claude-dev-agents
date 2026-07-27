@@ -18,7 +18,7 @@
 # helpers sit in the same directory; in a repo checkout they're in libexec/.
 set -euo pipefail
 
-VERSION="1.0.4"
+VERSION="1.1.0"
 
 # Resolve our own location, following symlinks (brew links into bin/).
 SELF="${BASH_SOURCE[0]}"
@@ -58,6 +58,8 @@ hook_libexec() {
 }
 
 # ---------------------------------------------------------------- doctor
+# Pass --no-probe to skip the live model call (used by setup, which only needs
+# the dependency check and shouldn't spend a `claude -p` call to get it).
 cmd_doctor() {
   echo "Dependencies:"
   local ok=0
@@ -69,6 +71,34 @@ cmd_doctor() {
     if gh auth status >/dev/null 2>&1; then c_ok "gh authenticated"
     else c_warn "gh not authenticated — run: gh auth login"; ok=1; fi
   fi
+
+  if [ "${1:-}" != "--no-probe" ] && command -v claude >/dev/null 2>&1; then
+    echo
+    echo "Review model:"
+    # shellcheck source=libexec/lib.sh
+    . "$LIBEXEC/lib.sh"
+    c_info "resolved: $CLAUDE_AGENTS_MODEL_LABEL"
+    if [ -z "$CLAUDE_AGENTS_MODEL" ]; then
+      c_info "set CLAUDE_AGENTS_MODEL to a fast model id to cut review latency/cost"
+    fi
+    # The hooks fail open, so a model id this backend doesn't recognise looks
+    # exactly like a clean review. One real call is the only way to tell them
+    # apart — which is why this probe exists rather than just printing the id.
+    local raw err
+    raw="$(printf 'Reply with the single word: ok' | claude_raw)"
+    err="$(claude_error "$raw")"
+    if [ -n "$err" ]; then
+      c_bad "model call failed — $err"
+      c_warn "hooks fail open: reviews would be skipped silently, not blocked"
+      ok=1
+    elif [ -z "$raw" ]; then
+      c_bad "no response within ${CLAUDE_AGENTS_TIMEOUT}s — raise CLAUDE_AGENTS_TIMEOUT"
+      ok=1
+    else
+      c_ok "model call succeeded"
+    fi
+  fi
+
   echo
   [ "$ok" -eq 0 ] && c_ok "all good" || c_warn "fix the above, then re-run"
   return $ok
@@ -77,7 +107,7 @@ cmd_doctor() {
 # ---------------------------------------------------------------- setup
 cmd_setup() {
   echo "Machine setup:"
-  cmd_doctor >/dev/null 2>&1 || { cmd_doctor; die "dependencies missing"; }
+  cmd_doctor --no-probe >/dev/null 2>&1 || { cmd_doctor --no-probe; die "dependencies missing"; }
   c_ok "dependencies present"
 
   mkdir -p "$HOME/.claude" "$LESSONS_DIR"
@@ -88,6 +118,30 @@ cmd_setup() {
   cp "$PREFIX/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
   c_ok "global CLAUDE.md -> ~/.claude/CLAUDE.md"
   c_ok "lessons library -> $LESSONS_DIR"
+
+  # Model ids differ per backend (first-party vs Bedrock vs Vertex) and, on
+  # Bedrock, per account. Probe for one that actually works and record it, so
+  # the hooks don't fall back to an id this machine will 404 on — which they
+  # would swallow, since they fail open.
+  # Capture before sourcing: lib.sh *resolves* CLAUDE_AGENTS_MODEL to a default,
+  # so checking it afterwards would report every machine as user-pinned.
+  local pinned="${CLAUDE_AGENTS_MODEL+yes}" pinned_value="${CLAUDE_AGENTS_MODEL:-}"
+  # shellcheck source=libexec/lib.sh
+  . "$LIBEXEC/lib.sh"
+  if [ -n "$pinned" ]; then
+    c_info "model pinned by environment: ${pinned_value:-<Claude Code default>} (not probing)"
+  else
+    echo "  • detecting a working model (one or two short calls)..."
+    local detected rc=0
+    detected="$(detect_model)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      c_bad "no model responded — check \`claude -p 'hi'\` works, then re-run setup"
+    else
+      write_model_config "$detected"
+      if [ -n "$detected" ]; then c_ok "model: $detected -> $CLAUDE_AGENTS_CONFIG"
+      else c_ok "model: Claude Code's default -> $CLAUDE_AGENTS_CONFIG"; fi
+    fi
+  fi
 
   if [ "$(uname)" = "Darwin" ]; then
     local LA="$HOME/Library/LaunchAgents" PLIST
@@ -204,7 +258,7 @@ case "${1:-}" in
   review)     shift; "$LIBEXEC/review.sh" "$@" ;;
   pr)         shift; "$LIBEXEC/pr.sh" "$@" ;;
   status)     shift; cmd_status ;;
-  doctor)     shift; cmd_doctor ;;
+  doctor)     shift; cmd_doctor "$@" ;;
   -v|--version) echo "claude-agents $VERSION" ;;
   ""|-h|--help) sed -n '4,15p' "$SELF" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command: $1 (try --help)" ;;

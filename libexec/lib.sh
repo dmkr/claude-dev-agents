@@ -63,19 +63,68 @@ agent_only_docs() {
 # CLAUDE_AGENTS_MODEL for a stronger review. CLAUDE_AGENTS_TIMEOUT caps the call
 # so a slow/hung model (e.g. an always-thinking one on a big diff) can't stall
 # a push — on timeout the hook fails open, same as any other model error.
-CLAUDE_AGENTS_MODEL="${CLAUDE_AGENTS_MODEL:-claude-haiku-4-5}"
+#
+# `claude-haiku-4-5` is a first-party id. On Bedrock/Vertex the id is provider-
+# and account-specific (e.g. global.anthropic.claude-haiku-4-5-20251001-v1:0),
+# so the first-party default would fail — and because these hooks fail open, it
+# would look exactly like a clean review rather than an error. So: prefer an
+# explicit override, then whatever small/fast model Claude Code is configured
+# with, and on a provider backend with neither, pass no --model at all and let
+# Claude Code pick a valid id itself. Guessing a provider id is not an option.
+#
+# `claude-agents setup` probes for a working id and writes it to the config file
+# below, which is why the file is read before any of the fallbacks apply. The
+# file also survives the environment git hooks *don't* inherit — a GUI client
+# never sources ~/.zshrc, so an exported var alone silently reverts to default.
+CLAUDE_AGENTS_CONFIG="${CLAUDE_AGENTS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-agents/config}"
+
+# Set-but-empty and unset are different answers here: an empty value is setup's
+# way of recording "this backend only works with Claude Code's own default, so
+# pass no --model". Falling through to the id-guessing below in that case would
+# reintroduce exactly the 404 setup just probed its way around — so track
+# whether the value was *defined* (${x+y}), not whether it is non-empty.
+_ca_env_defined="${CLAUDE_AGENTS_MODEL+yes}"
+_ca_env_value="${CLAUDE_AGENTS_MODEL:-}"
+if [ -r "$CLAUDE_AGENTS_CONFIG" ]; then
+  # shellcheck disable=SC1090
+  . "$CLAUDE_AGENTS_CONFIG"
+fi
+# Environment beats the file.
+[ -n "$_ca_env_defined" ] && CLAUDE_AGENTS_MODEL="$_ca_env_value"
+
+if [ -z "${CLAUDE_AGENTS_MODEL+yes}" ]; then
+  CLAUDE_AGENTS_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-${ANTHROPIC_SMALL_FAST_MODEL:-}}"
+  if [ -z "$CLAUDE_AGENTS_MODEL" ] \
+     && [ -z "${CLAUDE_CODE_USE_BEDROCK:-}${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+    CLAUDE_AGENTS_MODEL="claude-haiku-4-5"
+  fi
+fi
+unset _ca_env_defined _ca_env_value
+
+# An empty model means "let Claude Code decide" — omit the flag entirely rather
+# than passing --model "". Built as an array so the empty case adds no argument.
+CLAUDE_AGENTS_MODEL_ARGS=()
+CLAUDE_AGENTS_MODEL_LABEL="Claude Code's default model"
+if [ -n "$CLAUDE_AGENTS_MODEL" ]; then
+  CLAUDE_AGENTS_MODEL_ARGS=(--model "$CLAUDE_AGENTS_MODEL")
+  CLAUDE_AGENTS_MODEL_LABEL="$CLAUDE_AGENTS_MODEL"
+fi
+
 CLAUDE_AGENTS_TIMEOUT="${CLAUDE_AGENTS_TIMEOUT:-90}"
 
 # Run "$@" with a wall-clock limit (seconds), returning its stdout. Prefers
 # coreutils timeout/gtimeout; falls back to a portable background-and-kill so it
 # works on a stock macOS. The child writes to a temp file, never the caller's
 # capture pipe — so if the kill orphans a grandchild, the caller is not blocked.
+# The explicit `<&0` is load-bearing: a non-interactive shell assigns /dev/null
+# to an async command's stdin unless stdin is redirected explicitly, which would
+# silently feed the model an empty prompt (callers pipe the prompt in on stdin).
 run_timeout() {
   local secs="$1"; shift
   if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
   if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
   local tmp; tmp="$(mktemp)"
-  "$@" >"$tmp" 2>/dev/null &
+  "$@" <&0 >"$tmp" 2>/dev/null &
   local pid=$!
   ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   local timer=$!
@@ -86,20 +135,115 @@ run_timeout() {
   return "$rc"
 }
 
+# Run claude headless, no tools, return the raw envelope JSON (empty on timeout
+# or hard failure). Callers want claude_json; this exists so the doctor can read
+# the error fields too. Prompt via stdin.
+claude_raw() {
+  # ${a[@]+"${a[@]}"} — expanding an empty array is an unbound-variable error
+  # under `set -u` on bash 3.2 (what stock macOS ships), so guard the expansion.
+  run_timeout "$CLAUDE_AGENTS_TIMEOUT" \
+    claude -p - ${CLAUDE_AGENTS_MODEL_ARGS[@]+"${CLAUDE_AGENTS_MODEL_ARGS[@]}"} \
+    --allowedTools "" --output-format json 2>/dev/null || true
+}
+
+# Human-readable reason the last call failed, or empty if it didn't. A model id
+# this backend doesn't recognise surfaces here as a 404.
+claude_error() {
+  printf '%s' "$1" | jq -r '
+    if (.is_error // false) then
+      ((.api_error_status // .terminal_reason // "error") | tostring)
+        + ": " + ((.result // "unknown") | tostring | .[0:160])
+    else empty end' 2>/dev/null || true
+}
+
 # Run claude headless, no tools, return raw text result (fail-open: any error,
 # non-JSON, or timeout yields empty output, never a non-zero exit). Prompt via stdin.
 claude_json() {
   local out
-  out="$(run_timeout "$CLAUDE_AGENTS_TIMEOUT" \
-        claude -p - --model "$CLAUDE_AGENTS_MODEL" --allowedTools "" --output-format json 2>/dev/null)" || true
+  out="$(claude_raw)"
+  # An API failure still exits 0 with well-formed JSON — is_error:true,
+  # api_error_status:404, subtype:"success" — and puts the error prose in
+  # .result. Extracting .result unconditionally would hand that sentence back as
+  # if the model had said it, so gate on is_error and emit nothing instead.
+  #
   # `|| true` is load-bearing: on a timeout or error, `out` is empty/partial and
   # jq exits non-zero; without this the hooks (under `set -e`) would abort and
   # fail CLOSED. Fail open — emit whatever parsed (often nothing) and return 0.
-  printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null | sed 's/```json//g; s/```//g' || true
+  printf '%s' "$out" \
+    | jq -r 'if (.is_error // false) then empty else (.result // empty) end' 2>/dev/null \
+    | sed 's/```json//g; s/```//g' || true
 }
 
 # True if $1 is valid JSON.
 is_json() { echo "$1" | jq empty 2>/dev/null; }
+
+# --------------------------------------------------------------- model probing
+# True if this backend accepts model id "$1" (empty = whatever Claude Code would
+# pick on its own). One tiny call; a rejected id 404s with duration_api_ms 0, so
+# walking a candidate list is cheap. Short timeout — we're testing reachability,
+# not waiting out a real generation.
+probe_model() {
+  local id="${1:-}" raw args=()
+  [ -n "$id" ] && args=(--model "$id")
+  raw="$(printf 'Reply with the single word: ok' \
+    | run_timeout "${CLAUDE_AGENTS_PROBE_TIMEOUT:-30}" \
+      claude -p - ${args[@]+"${args[@]}"} --allowedTools "" --output-format json 2>/dev/null || true)"
+  [ -n "$raw" ] && [ -z "$(claude_error "$raw")" ]
+}
+
+# Model ids to try, best (cheapest/fastest) first. On Bedrock the ids are
+# account-specific, so ask AWS for the real ones rather than guessing; the
+# static entries are only a fallback for when the aws CLI isn't around.
+model_candidates() {
+  if [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then
+    if command -v aws >/dev/null 2>&1; then
+      # Inference profiles first (what `global.anthropic.*` ids are), then
+      # on-demand foundation models. Haiku before Sonnet, newest first.
+      aws bedrock list-inference-profiles --query \
+        'inferenceProfileSummaries[].inferenceProfileId' --output text 2>/dev/null \
+        | tr '\t' '\n' | grep -i 'anthropic.*haiku' | sort -r
+      aws bedrock list-foundation-models --by-provider anthropic --query \
+        'modelSummaries[].modelId' --output text 2>/dev/null \
+        | tr '\t' '\n' | grep -i haiku | sort -r
+    fi
+    echo "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    echo "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+    echo "claude-haiku-4-5@20251001"
+    echo "claude-haiku-4-5"
+  else
+    echo "claude-haiku-4-5"
+    echo "haiku"
+  fi
+}
+
+# Print the first candidate this backend accepts and return 0. Prints nothing
+# and still returns 0 when only Claude Code's own default works — that is a
+# valid configuration (the hooks just omit --model). Returns 1 if nothing works,
+# which means the CLI itself is broken or unauthenticated, not a model problem.
+detect_model() {
+  local c
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    if probe_model "$c"; then printf '%s\n' "$c"; return 0; fi
+  done <<< "$(model_candidates)"
+  probe_model "" && return 0
+  return 1
+}
+
+# Persist the chosen model so git hooks see it regardless of how the push was
+# launched. Args: <model id> (empty is meaningful — see detect_model).
+write_model_config() {
+  local id="${1:-}" dir
+  dir="$(dirname "$CLAUDE_AGENTS_CONFIG")"
+  mkdir -p "$dir"
+  {
+    echo "# Written by \`claude-agents setup\`. Edit freely; the environment"
+    echo "# variable CLAUDE_AGENTS_MODEL still overrides whatever is set here."
+    echo "# An empty value means: pass no --model and let Claude Code choose."
+    echo "CLAUDE_AGENTS_MODEL='$id'"
+  } > "$CLAUDE_AGENTS_CONFIG"
+}
 
 # Run the blocking reviewer over a diff spec (a range like origin/main..HEAD, a
 # ref like HEAD, or --cached). Prints findings. Returns 1 only when the verdict
