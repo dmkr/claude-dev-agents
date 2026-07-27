@@ -344,7 +344,7 @@ write_model_config() {
 # ref like HEAD, or --cached). Prints findings. Returns 1 only when the verdict
 # is 'block'; empty/unparseable output fails open (returns 0). Args: <spec>.
 run_review() {
-  local spec="$1" diff brain prompt raw
+  local spec="$1" diff brain prompt raw t0="$SECONDS"
   diff="$(agent_diff "$spec")"
   [ -z "$diff" ] && { echo "  (nothing to review)"; return 0; }
   brain="$(load_brain)"
@@ -392,5 +392,18 @@ $diff"
   fi
   raw="$parsed"
   echo "$raw" | jq -r '.findings[]? | "  [\(.severity)] \(.file):\(.line) — \(.rule): \(.comment)"'
+
+  # A clean review prints no findings, which on its own is indistinguishable
+  # from the reviewer having quietly done nothing — the failure mode this whole
+  # code path exists to make visible. Always confirm that it ran, and on what.
+  local n_all n_err
+  n_all="$(echo "$raw" | jq -r '(.findings // []) | length' 2>/dev/null || echo 0)"
+  n_err="$(echo "$raw" | jq -r '[(.findings // [])[] | select(.severity == "error")] | length' 2>/dev/null || echo 0)"
+  if [ "$n_all" = "0" ]; then
+    echo "  reviewed in $((SECONDS - t0))s — no findings ($CLAUDE_AGENTS_MODEL_LABEL)"
+  else
+    echo "  reviewed in $((SECONDS - t0))s — $n_all finding(s), $n_err error(s) ($CLAUDE_AGENTS_MODEL_LABEL)"
+  fi
+
   [ "$(echo "$raw" | jq -r '.verdict')" = "block" ] && return 1 || return 0
 }
