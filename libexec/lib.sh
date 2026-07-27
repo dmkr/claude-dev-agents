@@ -189,6 +189,14 @@ claude_error() {
     else empty end' 2>/dev/null || true
 }
 
+# Extract the assistant text from a raw envelope, stripping code fences.
+# Args: <raw envelope>. Returns empty if the call errored.
+claude_result() {
+  printf '%s' "$1" \
+    | jq -r 'if (.is_error // false) then empty else (.result // empty) end' 2>/dev/null \
+    | sed 's/```json//g; s/```//g' || true
+}
+
 # Run claude headless, no tools, return raw text result (fail-open: any error,
 # non-JSON, or timeout yields empty output, never a non-zero exit). Prompt via stdin.
 claude_json() {
@@ -332,9 +340,30 @@ Rules:
 
 DIFF:
 $diff"
-  raw="$(printf '%s' "$prompt" | claude_json)"
+  # Distinguish the three ways this can go wrong. They all fail open, but
+  # collapsing them into one "unparseable" line hid a machine whose model id
+  # didn't exist for an entire release — every push looked reviewed and wasn't.
+  local envelope err
+  envelope="$(printf '%s' "$prompt" | claude_raw)"
+  err="$(claude_error "$envelope")"
+  # run_timeout kills the CLI mid-stream, which it reports as aborted_streaming
+  # rather than as a timeout — surface it as the timeout it actually is.
+  if [ -z "$envelope" ] || case "$err" in *aborted_streaming*) true ;; *) false ;; esac; then
+    echo "  reviewer: no response within ${CLAUDE_AGENTS_TIMEOUT}s — allowing."
+    echo "    the model may be too slow for this diff; raise CLAUDE_AGENTS_TIMEOUT,"
+    echo "    or pick a faster model (run: claude-agents doctor)"
+    return 0
+  elif [ -n "$err" ]; then
+    echo "  reviewer: model call failed — $err"
+    echo "    allowing the push; run 'claude-agents doctor' to diagnose"
+    return 0
+  fi
+
+  raw="$(claude_result "$envelope")"
   if ! is_json "$raw"; then
-    echo "  reviewer output unparseable — allowing."
+    echo "  reviewer: expected JSON, got prose — allowing. First 200 chars:"
+    printf '%s\n' "$raw" | head -c 200 | sed 's/^/    /'
+    echo
     return 0
   fi
   echo "$raw" | jq -r '.findings[]? | "  [\(.severity)] \(.file):\(.line) — \(.rule): \(.comment)"'

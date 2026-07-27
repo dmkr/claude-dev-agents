@@ -18,7 +18,7 @@
 # helpers sit in the same directory; in a repo checkout they're in libexec/.
 set -euo pipefail
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 
 # Resolve our own location, following symlinks (brew links into bin/).
 SELF="${BASH_SOURCE[0]}"
