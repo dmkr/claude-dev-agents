@@ -215,8 +215,29 @@ claude_json() {
     | sed 's/```json//g; s/```//g' || true
 }
 
-# True if $1 is valid JSON.
-is_json() { echo "$1" | jq empty 2>/dev/null; }
+# True if $1 is valid JSON. The emptiness guard is load-bearing: `jq empty` on
+# empty input succeeds (there are simply no values to reject), so without it an
+# empty reviewer result parses as valid, yields no findings and no verdict, and
+# is reported as a clean pass.
+is_json() {
+  case "$1" in *[![:space:]]*) ;; *) return 1 ;; esac
+  echo "$1" | jq empty 2>/dev/null
+}
+
+# Print the JSON object embedded in $1, or return 1. Models are asked for bare
+# JSON but often wrap it in a sentence ("Here's my review: {...} Hope that
+# helps!"), which is a formatting quirk, not a failed review — salvage it rather
+# than discarding a perfectly good verdict. Spans the first '{' to the last '}'
+# (greedy), so nested objects survive.
+extract_json() {
+  local s="$1" cand
+  is_json "$s" && { printf '%s' "$s"; return 0; }
+  cand="$(printf '%s' "$s" | awk '{a = a $0 ORS}
+    END { i = index(a, "{"); if (i == 0) exit 1
+          b = substr(a, i); if (match(b, /.*\}/)) printf "%s", substr(b, 1, RLENGTH) }')" || return 1
+  [ -n "$cand" ] && is_json "$cand" && { printf '%s' "$cand"; return 0; }
+  return 1
+}
 
 # --------------------------------------------------------------- model probing
 # True if this backend accepts model id "$1" (empty = whatever Claude Code would
@@ -330,7 +351,9 @@ run_review() {
   prompt="You are a rigorous staff-level engineer reviewing the diff below.
 $brain
 
-Return ONLY a JSON object, no markdown fences:
+Your entire response must be a single JSON object and nothing else. Start with
+{ and end with }. No preamble, no explanation, no markdown fences, no closing
+remark. Shape:
 {\"findings\":[{\"severity\":\"error|warning|suggestion\",\"file\":\"\",\"line\":0,\"rule\":\"\",\"comment\":\"\"}],\"verdict\":\"block|pass\"}
 Rules:
 - severity 'error' ONLY for things that must block a push: bugs, security,
@@ -360,12 +383,14 @@ $diff"
   fi
 
   raw="$(claude_result "$envelope")"
-  if ! is_json "$raw"; then
+  local parsed
+  if ! parsed="$(extract_json "$raw")"; then
     echo "  reviewer: expected JSON, got prose — allowing. First 200 chars:"
     printf '%s\n' "$raw" | head -c 200 | sed 's/^/    /'
     echo
     return 0
   fi
+  raw="$parsed"
   echo "$raw" | jq -r '.findings[]? | "  [\(.severity)] \(.file):\(.line) — \(.rule): \(.comment)"'
   [ "$(echo "$raw" | jq -r '.verdict')" = "block" ] && return 1 || return 0
 }
