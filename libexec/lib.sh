@@ -143,7 +143,34 @@ if [ -n "$CLAUDE_AGENTS_MODEL" ]; then
   CLAUDE_AGENTS_MODEL_LABEL="$CLAUDE_AGENTS_MODEL"
 fi
 
-CLAUDE_AGENTS_TIMEOUT="${CLAUDE_AGENTS_TIMEOUT:-90}"
+# 90s was too tight: a 13.6k-char diff against Haiku measured 71s and 87s on
+# repeat runs, so ordinary latency variance alone pushed reviews over the cap —
+# and a timeout fails open, meaning the push went unreviewed.
+CLAUDE_AGENTS_TIMEOUT="${CLAUDE_AGENTS_TIMEOUT:-180}"
+
+# The hooks inherit interactive settings, including effortLevel. On a
+# verdict-only JSON task that extra thinking buys nothing and costs a lot of
+# wall clock: measured on a 13.6k-char diff against Haiku, inherited `high`
+# took 71s versus 38s at `low` — enough on its own to blow the 90s cap.
+# MCP servers are likewise started for every `claude -p` call even though the
+# hooks pass --allowedTools "" and cannot use them.
+#
+# Both flags are recent, so probe --help once rather than hard-failing on an
+# older CLI. Set CLAUDE_AGENTS_EFFORT= (empty) to inherit your settings instead.
+CLAUDE_AGENTS_EFFORT="${CLAUDE_AGENTS_EFFORT-low}"
+CLAUDE_AGENTS_PERF_ARGS=()
+if command -v claude >/dev/null 2>&1; then
+  _ca_help="$(claude --help 2>/dev/null || true)"
+  case "$_ca_help" in
+    *--strict-mcp-config*) CLAUDE_AGENTS_PERF_ARGS+=(--strict-mcp-config) ;;
+  esac
+  if [ -n "$CLAUDE_AGENTS_EFFORT" ]; then
+    case "$_ca_help" in
+      *--effort*) CLAUDE_AGENTS_PERF_ARGS+=(--effort "$CLAUDE_AGENTS_EFFORT") ;;
+    esac
+  fi
+  unset _ca_help
+fi
 
 # Run "$@" with a wall-clock limit (seconds), returning its stdout. Prefers
 # coreutils timeout/gtimeout; falls back to a portable background-and-kill so it
@@ -176,6 +203,7 @@ claude_raw() {
   # under `set -u` on bash 3.2 (what stock macOS ships), so guard the expansion.
   run_timeout "$CLAUDE_AGENTS_TIMEOUT" \
     claude -p - ${CLAUDE_AGENTS_MODEL_ARGS[@]+"${CLAUDE_AGENTS_MODEL_ARGS[@]}"} \
+    ${CLAUDE_AGENTS_PERF_ARGS[@]+"${CLAUDE_AGENTS_PERF_ARGS[@]}"} \
     --allowedTools "" --output-format json 2>/dev/null || true
 }
 

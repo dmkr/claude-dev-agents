@@ -18,7 +18,7 @@
 # helpers sit in the same directory; in a repo checkout they're in libexec/.
 set -euo pipefail
 
-VERSION="1.1.4"
+VERSION="1.1.5"
 
 # Resolve our own location, following symlinks (brew links into bin/).
 SELF="${BASH_SOURCE[0]}"
@@ -77,16 +77,20 @@ cmd_doctor() {
     echo "Review model:"
     # shellcheck source=libexec/lib.sh
     . "$LIBEXEC/lib.sh"
+    c_info "backend:  $(agents_backend)"
     c_info "resolved: $CLAUDE_AGENTS_MODEL_LABEL"
+    c_info "effort:   ${CLAUDE_AGENTS_EFFORT:-<inherited from settings>}"
+    c_info "timeout:  ${CLAUDE_AGENTS_TIMEOUT}s per call"
     if [ -z "$CLAUDE_AGENTS_MODEL" ]; then
       c_info "set CLAUDE_AGENTS_MODEL to a fast model id to cut review latency/cost"
     fi
     # The hooks fail open, so a model id this backend doesn't recognise looks
     # exactly like a clean review. One real call is the only way to tell them
     # apart — which is why this probe exists rather than just printing the id.
-    local raw err
+    local raw err t0="$SECONDS"
     raw="$(printf 'Reply with the single word: ok' | claude_raw)"
     err="$(claude_error "$raw")"
+    c_info "round trip: $((SECONDS - t0))s for a trivial prompt (fixed overhead)"
     if [ -n "$err" ]; then
       c_bad "model call failed — $err"
       c_warn "hooks fail open: reviews would be skipped silently, not blocked"

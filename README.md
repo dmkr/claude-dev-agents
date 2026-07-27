@@ -105,8 +105,14 @@ One file generated for you:
 - Git hooks inherit the environment of whatever ran `git push`. Exporting
   `CLAUDE_AGENTS_MODEL` in `~/.zshrc` covers terminal pushes but not GUI clients
   (Fork, Tower, VS Code) — use `~/.zshenv` if you push from those.
-- `CLAUDE_AGENTS_TIMEOUT` (seconds, default 90) caps each model call; on timeout
+- `CLAUDE_AGENTS_TIMEOUT` (seconds, default 180) caps each model call; on timeout
   the hook fails open (the push proceeds), so a slow model can't stall you.
+- Hook calls run at `--effort low` and `--strict-mcp-config`: the review is a
+  verdict-only JSON task, so inherited interactive settings (notably
+  `effortLevel: high`) and MCP server startup cost wall-clock for nothing. On a
+  13.6k-char diff against Haiku, inherited `high` measured 71s vs 38s at `low`.
+  Set `CLAUDE_AGENTS_EFFORT=` (empty) to inherit your settings instead, or to
+  `medium`/`high` to override.
 - `CLAUDE_AGENTS_DIFF_CAP` (chars, default 120000) bounds the diff sent to the
   reviewer; `CLAUDE_AGENTS_NO_PR_DESC=1` skips the background PR-description and
   drift pass (one fewer `claude -p` call per push).
